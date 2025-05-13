@@ -279,21 +279,27 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
             print(f'Decoded. Current latent shape {real_history_latents.shape}; pixel shape {history_pixels.shape}')
 
             global_stream.output_queue.push(('file', output_filename))
-    except:
+    except Exception as e:
         traceback.print_exc()
-
+    finally:
+        # Limpieza garantizada
         if not high_vram:
             unload_complete_models(
                 text_encoder, text_encoder_2, image_encoder, vae, transformer
             )
+        torch.cuda.empty_cache()
 
     global_stream.output_queue.push(('end', None))
     return
 
 def process(input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf):
+    global global_stream
     assert input_image is not None, 'No input image!'
 
     yield None, None, '', '', gr.update(interactive=False), gr.update(interactive=True)
+
+    # Reiniciar el stream para cada proceso
+    global_stream = AsyncStream()
 
     async_run(worker, input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf)
 
@@ -319,7 +325,22 @@ def process(input_image, prompt, n_prompt, seed, total_second_length, latent_win
             break
 
 def end_process():
+    global global_stream
+    
+    # Enviar señal de interrupción
     global_stream.input_queue.push('end')
+    
+    # Descargar todos los modelos de la GPU
+    if not high_vram:
+        unload_complete_models(
+            text_encoder, text_encoder_2, image_encoder, vae, transformer
+        )
+    
+    # Resetear el stream para futuras generaciones
+    global_stream = AsyncStream()
+    
+    # Liberar memoria de CUDA (opcional pero recomendado)
+    torch.cuda.empty_cache()
 
 def process_batch(input_folder='input', output_folder='outputs', duration=5.0, seed=31337, steps=25, use_teacache=True, gpu_memory_preservation=6, mp4_crf=16):
     """
@@ -583,7 +604,12 @@ with block:
         inputs=single_ips, 
         outputs=[result_video, preview_image, progress_desc, progress_bar, start_button, end_button]
     )
-    end_button.click(fn=end_process)
+    end_button.click(
+        fn=end_process,
+        outputs=None,
+        queue=False,  # ¡Importante! Evita bloquear la cola de Gradio
+        preprocess=False
+    )
     
     # Conexiones para procesamiento por lotes
     batch_button.click(
