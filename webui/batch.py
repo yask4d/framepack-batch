@@ -11,6 +11,8 @@ import numpy as np
 import argparse
 import math
 import glob
+import json
+from datetime import datetime
 from PIL import Image
 from diffusers import AutoencoderKLHunyuanVideo
 from transformers import LlamaModel, CLIPTextModel, LlamaTokenizerFast, CLIPTokenizer
@@ -101,6 +103,39 @@ os.makedirs(outputs_folder, exist_ok=True)
 # Función para generar seed aleatorio
 def generate_random_seed():
     return torch.randint(0, 2**32 - 1, (1,)).item()
+    
+def clean_previous_outputs(output_folder, job_id=None):
+    """Elimina archivos temporales de generaciones anteriores"""
+    if job_id:
+        # Eliminar archivos específicos de un job_id
+        for ext in ['mp4', 'png']:
+            pattern = os.path.join(output_folder, f'{job_id}_*.{ext}')
+            for temp_file in glob.glob(pattern):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
+    else:
+        # Eliminar todos los archivos temporales (_final.mp4 e _input.png se conservan)
+        for ext in ['mp4', 'png']:
+            pattern = os.path.join(output_folder, f'*_*.{ext}')
+            for temp_file in glob.glob(pattern):
+                if not ('_final.' in temp_file or '_input.' in temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
+
+# Función para guardar settings
+def save_job_settings(output_folder, job_id, settings):
+    """
+    Guarda los settings de un job en un archivo JSON
+    """
+    settings_file = os.path.join(output_folder, f'{job_id}_settings.json')
+    settings['timestamp'] = datetime.now().isoformat()
+    
+    with open(settings_file, 'w') as f:
+        json.dump(settings, f, indent=2)
 
 # Función worker
 @torch.no_grad()
@@ -109,13 +144,39 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
     total_latent_sections = int(max(round(total_latent_sections), 1))
 
     job_id = generate_timestamp() if batch_id is None else f"batch_{batch_id}"
-
+    
+    # Create initial job settings without resolution info
+    job_settings = {
+        'job_id': job_id,
+        'prompt': prompt,
+        'negative_prompt': n_prompt,
+        'seed': seed,
+        'duration_seconds': total_second_length,
+        'latent_window_size': latent_window_size,
+        'steps': steps,
+        'cfg_scale': cfg,
+        'distilled_guidance_scale': gs,
+        'guidance_rescale': rs,
+        'gpu_memory_preservation_gb': gpu_memory_preservation,
+        'use_teacache': use_teacache,
+        'mp4_crf': mp4_crf,
+        'input_image_size': input_image.shape if input_image is not None else None,
+        # We'll add output_resolution later after calculating height and width
+    }
+    
+    save_job_settings(output_folder, job_id, job_settings)
     if batch_id is not None:
         global_stream.output_queue.push(('batch_progress', f"Processing batch item {batch_id}..."))
         global_stream.output_queue.push(('progress', (None, f"Starting batch item {batch_id}", make_progress_bar_html(0, 'Starting batch item...'))))
     else:
         global_stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'Starting ...'))))
 
+    # Limpiar archivos previos de la misma generación
+    clean_previous_outputs(output_folder, job_id)
+
+    # Variable para el archivo final
+    final_output_filename = os.path.join(output_folder, f'{job_id}_final.mp4')
+    
     try:
         if not high_vram:
             unload_complete_models(
@@ -142,9 +203,12 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
 
         H, W, C = input_image.shape
         height, width = find_nearest_bucket(H, W, resolution=640)
+        job_settings['output_resolution'] = f"{height}x{width}"
+        save_job_settings(output_folder, job_id, job_settings)
         input_image_np = resize_and_center_crop(input_image, target_width=width, target_height=height)
 
-        Image.fromarray(input_image_np).save(os.path.join(output_folder, f'{job_id}.png'))
+        # Guardar solo la imagen de entrada (sobrescribir si existe)
+        Image.fromarray(input_image_np).save(os.path.join(output_folder, f'{job_id}_input.png'))
 
         input_image_pt = torch.from_numpy(input_image_np).float() / 127.5 - 1
         input_image_pt = input_image_pt.permute(2, 0, 1)[None, :, None]
@@ -272,22 +336,22 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
             if not high_vram:
                 unload_complete_models()
 
-            output_filename = os.path.join(output_folder, f'{job_id}_{total_generated_latent_frames}.mp4')
-
-            save_bcthw_as_mp4(history_pixels, output_filename, fps=30, crf=mp4_crf)
+            # Guardar siempre en el mismo archivo final (sobrescribir)
+            save_bcthw_as_mp4(history_pixels, final_output_filename, fps=30, crf=mp4_crf)
 
             print(f'Decoded. Current latent shape {real_history_latents.shape}; pixel shape {history_pixels.shape}')
 
-            global_stream.output_queue.push(('file', output_filename))
-    except Exception as e:
+            global_stream.output_queue.push(('file', final_output_filename))
+    except:
+        # Eliminar archivos generados si hay error
+        if os.path.exists(final_output_filename):
+            os.remove(final_output_filename)
         traceback.print_exc()
-    finally:
-        # Limpieza garantizada
+
         if not high_vram:
             unload_complete_models(
                 text_encoder, text_encoder_2, image_encoder, vae, transformer
             )
-        torch.cuda.empty_cache()
 
     global_stream.output_queue.push(('end', None))
     return
@@ -350,8 +414,11 @@ def process_batch(input_folder='input', output_folder='outputs', duration=5.0, s
     os.makedirs(input_folder, exist_ok=True)
     os.makedirs(output_folder, exist_ok=True)
     
+    # Limpiar archivos previos en la carpeta de salida
+    clean_previous_outputs(output_folder)
+
     # Verificar archivo de prompts
-    prompt_file = os.path.join(input_folder, 'prompt')
+    prompt_file = os.path.join(input_folder, 'prompt.txt')
     if not os.path.exists(prompt_file):
         error_msg = f"Error: Prompt file not found at {prompt_file}"
         print(error_msg)
@@ -429,33 +496,49 @@ def process_batch(input_folder='input', output_folder='outputs', duration=5.0, s
         else:
             prompt = prompts[i]
         
-        progress_msg = f"Processing {i+1}/{len(image_files)}: {os.path.basename(image_file)}"
+        # Generar una seed única para este job
+        current_seed = generate_random_seed() if seed == -1 else seed
+        # Si seed es -1, se generará una aleatoria para cada job
+        
+        progress_msg = f"Processing {i+1}/{len(image_files)}: {os.path.basename(image_file)} (Seed: {current_seed})"
         yield progress_msg, progress_msg, None, last_progress_html
         
         try:
             input_image = np.array(Image.open(image_file))
-            
             batch_id = os.path.basename(image_file).split('.')[0]
             
+            # Nombre del archivo final para este item
+            final_output_filename = os.path.join(output_folder, f'batch_{batch_id}_final.mp4')
+            
+            # Eliminar archivos temporales previos de este item
+            for prev_file in glob.glob(os.path.join(output_folder, f'batch_{batch_id}_*.mp4')):
+                if prev_file != final_output_filename:
+                    try:
+                        os.remove(prev_file)
+                    except:
+                        pass
+            
+            # Guardar la imagen de entrada
+            input_image_np = resize_and_center_crop(input_image, target_width=640, target_height=640)
+            Image.fromarray(input_image_np).save(os.path.join(output_folder, f'batch_{batch_id}_input.png'))
+            
             # Llamar a worker con los parámetros actuales
-            worker(input_image, prompt, n_prompt, current_params['seed'], current_params['duration'], 
+            worker(input_image, prompt, n_prompt, current_seed, current_params['duration'], 
                   latent_window_size, current_params['steps'], cfg, gs, rs, 
                   current_params['gpu_memory_preservation'], current_params['use_teacache'], 
                   current_params['mp4_crf'], batch_id, output_folder)
             
-            output_filename = None
             while True:
                 flag, data = global_stream.output_queue.next()
                 
                 if flag == 'file':
-                    output_filename = data
-                    results.append(output_filename)
-                    last_output = output_filename
-                    yield f"Generated: {output_filename}", progress_msg, gr.Video(value=output_filename), last_progress_html
+                    last_output = data
+                    results.append(last_output)
+                    yield f"Generated: {last_output}", progress_msg, gr.Video(value=last_output), last_progress_html
                 
                 if flag == 'progress':
                     preview, desc, html = data
-                    last_progress_html = html  # Guardar el último estado de la barra de progreso
+                    last_progress_html = html
                     yield progress_msg, desc, gr.Video(value=last_output) if last_output else None, html
                 
                 if flag == 'batch_progress':
@@ -562,12 +645,17 @@ with block:
                         
                     # Seed con botón random para batch
                     with gr.Row():
-                        batch_seed = gr.Number(label="Seed", value=31337, precision=0)
+                        batch_seed = gr.Number(
+                            label="Seed (-1 for random per job)", 
+                            value=31337, 
+                            precision=0,
+                            info="Set to -1 to use a different random seed for each job"
+                        )
                         batch_random_seed_btn = gr.Button("🎲", 
                             variant="secondary", 
                             size="lg", 
                             elem_classes="random-seed-btn"
-                        )
+                    )
                     with gr.Row():    
                         batch_steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=25, step=1)
                         batch_teacache = gr.Checkbox(label='Use TeaCache', value=True)
@@ -575,6 +663,7 @@ with block:
                     with gr.Row():
                         batch_gpu_mem = gr.Slider(label="GPU Memory (GB)", minimum=6, maximum=128, value=6, step=0.1)
                         batch_crf = gr.Slider(label="MP4 Quality", minimum=0, maximum=100, value=16, step=1)
+
                     
                     batch_button = gr.Button(value="Start Batch Processing", variant="primary")
                     batch_status = gr.Markdown('')

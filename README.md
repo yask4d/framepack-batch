@@ -1,104 +1,102 @@
-# FramePack-F1 Video Generation Tool
+# FramePack-F1 (Batch Processing Modification)  
+# Video Generation Tool  
 
-## Description
+## Description  
 
-FramePack-F1 is an advanced tool for generating videos from static images using artificial intelligence. The system employs diffusion models to create smooth animations based on an input image and a descriptive prompt.
+This version is a modification of the original **[FramePack by lllyasviel](https://github.com/lllyasviel/FramePack)** that adds batch processing functionality and other improvements.  
 
-## Key Features
+FramePack-F1 is an advanced tool for generating videos from static images using artificial intelligence. The system uses diffusion models to create smooth animations based on an input image and a descriptive prompt.  
 
-- Video generation from static images
-- Support for single and batch processing
-- Intuitive graphical interface with Gradio
-- Precise control over generation parameters
-- Memory optimization for GPUs with different capabilities
+**Key improvements over the original:**  
+- Full batch processing support  
+- Enhanced Gradio graphical interface  
+- Memory optimization for different GPU configurations  
+- Simplified setup for users  
 
-## Requirements
+## Key Features  
 
-- Python 3.8+
-- PyTorch with CUDA support
-- Dependencies listed in `requirements.txt`
-- CUDA-compatible GPU (recommended)
+- Video generation from static images  
+- **New:** Automatic batch processing  
+- Support for individual and batch processing  
+- Intuitive Gradio interface  
+- Precise control over generation parameters  
+- Memory optimization for GPUs with varying capabilities  
 
-## Installation
+## Installation  
 
-1. Clone the repository:
-   ```bash
-   git clone [repository URL]
-   cd [repository name]
-   ```
+1. First install the original FramePack following the instructions at:  
+   https://github.com/lllyasviel/FramePack  
 
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+2. Then download these two files from our modification:  
+   - [run-batch.bat](file_link) - Place it in the FramePack root directory  
+   - [batch.py](file_link) - Place it in the FramePack `webui` folder  
 
-3. Set environment variables (optional):
-   ```bash
-   export HF_HOME=./hf_download
-   ```
+3. Execute `run-batch.bat` to launch the enhanced interface  
 
-## Usage
+## Usage  
 
-### Graphical Interface
+### Enhanced Graphical Interface  
 
-Run the graphical interface with:
-```bash
-python batch.py
-```
+Run:  
+```bash  
+run-batch.bat  
+```  
 
-Available options:
-- `--share`: Enables remote access
-- `--server`: Specifies server IP address
-- `--port`: Specifies port number
-- `--inbrowser`: Automatically opens in browser
+### Terminal Mode (new functionality)  
 
-### Batch Mode
+For batch processing:  
+```bash  
+python batch.py --batch --input_folder [input_folder] --output_folder [output_folder] --duration [duration] --seed [seed] --steps [steps]  
+```  
 
-For batch processing:
-```bash
-python batch.py --batch --input_folder [input_folder] --output_folder [output_folder] --duration [duration] --seed [seed] --steps [steps]
-```
+### Batch Processing Structure  
 
-### Batch Processing Structure
+1. Create a folder with input images (.png, .jpg, .jpeg)  
+2. Add a file named 'prompt.txt' with one prompt per line  
+3. Optional: Create 'batch_params.txt' to override configurations  
 
-1. Create a folder with input images (.png, .jpg, .jpeg)
-2. Add a file named 'prompt' with one prompt per line
-3. Optional: Create 'batch_params.txt' to override settings
+## Important Parameters  
 
-## Important Parameters
+- **Seed**: Random generation seed  
+- **Total Video Length**: Video duration in seconds  
+- **Steps**: Number of inference steps  
+- **Distilled CFG Scale**: Controls adherence to prompt  
+- **GPU Memory Preservation**: Memory reserved for other processes  
+- **MP4 Compression**: Output video quality (0=best quality)  
 
-- **Seed**: Random generation seed
-- **Total Video Length**: Video duration in seconds
-- **Steps**: Number of inference steps (not recommended to change)
-- **Distilled CFG Scale**: Controls adherence to prompt
-- **GPU Memory Preservation**: Memory to reserve for other processes
-- **MP4 Compression**: Output video quality (0=best quality)
+## Prompt Examples  
 
-## Prompt Examples
+- "The girl dances gracefully, with clear movements, full of charm."  
+- "A character doing some simple body movements."  
 
-- "The girl dances gracefully, with clear movements, full of charm."
-- "A character doing some simple body movements."
+## Support and Community  
 
-## Support and Community
+Share your results and find ideas in the [FramePack Twitter (X) thread](https://x.com/search?q=framepack&f=live)  
 
-Share your results and find ideas on the [FramePack Twitter (X) thread](https://x.com/search?q=framepack&f=live)
+## Notes  
 
-## Notes
+- For GPUs with less than 60GB VRAM, High-VRAM mode is automatically disabled  
+- Quality may vary depending on parameters used  
+- Batch processing can be resource-intensive for many images  
 
-- For GPUs with less than 60GB VRAM, High-VRAM mode is automatically disabled
-- Quality may vary depending on parameters used
-- Processing can be resource-intensive for long videos
+## Acknowledgments  
 
-## License
+This project is based on the original work by lllyasviel:  
+https://github.com/lllyasviel/FramePack  
 
-Apache-2.0 license
+## License  
 
-# Cite
+Apache-2.0 license  
 
-    @article{zhang2025framepack,
-        title={Packing Input Frame Contexts in Next-Frame Prediction Models for Video Generation},
-        author={Lvmin Zhang and Maneesh Agrawala},
-        journal={Arxiv},
-        year={2025}
+© Kadyr Valdes (YASKAD)  
+
+https://www.youtube.com/c/YasKad  
+
+# Cite  
+
+    @article{zhang2025framepack,  
+        title={Packing Input Frame Contexts in Next-Frame Prediction Models for Video Generation},  
+        author={Lvmin Zhang and Maneesh Agrawala},  
+        journal={Arxiv},  
+        year={2025}  
     }
-
