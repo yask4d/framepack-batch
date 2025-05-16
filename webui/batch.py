@@ -12,7 +12,8 @@ import argparse
 import math
 import glob
 import json
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from PIL import Image
 from diffusers import AutoencoderKLHunyuanVideo
 from transformers import LlamaModel, CLIPTextModel, LlamaTokenizerFast, CLIPTokenizer
@@ -38,6 +39,7 @@ parser.add_argument("--output_folder", type=str, default='outputs', help="Folder
 parser.add_argument("--duration", type=float, default=5.0, help="Total video length in seconds")
 parser.add_argument("--seed", type=int, default=31337, help="Seed for video generation")
 parser.add_argument("--steps", type=int, default=25, help="Number of sampling steps")
+parser.add_argument("--schedule", type=str, help="Schedule time for batch processing (format: YYYY-MM-DD HH:MM:SS)")
 args = parser.parse_args()
 
 # Configuración inicial
@@ -412,10 +414,44 @@ def end_process():
     # Solo devolver 2 valores para los botones de batch
     return gr.update(interactive=True), gr.update(interactive=False)
 
-def process_batch(input_folder='input', output_folder='outputs', duration=5.0, seed=31337, steps=25, use_teacache=True, gpu_memory_preservation=6, mp4_crf=16):
+def process_batch(
+    input_folder='input', 
+    output_folder='outputs', 
+    duration=5.0, 
+    seed=31337, 
+    steps=25, 
+    use_teacache=True, 
+    gpu_memory_preservation=6, 
+    mp4_crf=16, 
+    schedule_time=None,
+    immediate_start=True  # Nuevo parámetro
+):
     """
     Process a batch of images from the input folder with corresponding prompts
     """
+    if immediate_start:
+        schedule_time = None
+    if schedule_time:
+        try:
+            schedule_datetime = datetime.strptime(schedule_time, "%Y-%m-%d %H:%M:%S")
+            current_time = datetime.now()
+        
+            if schedule_datetime < current_time:
+                yield "Error: Scheduled time is in the past", "", None, "", gr.update(interactive=True), gr.update(interactive=False)
+                return
+                
+            wait_seconds = (schedule_datetime - current_time).total_seconds()
+            wait_message = f"Batch processing scheduled for {schedule_time}. Waiting {wait_seconds:.0f} seconds..."
+            yield wait_message, "", None, "", gr.update(interactive=False), gr.update(interactive=True)
+            
+            # Esperar hasta el momento programado
+            while datetime.now() < schedule_datetime:
+                remaining = (schedule_datetime - datetime.now()).total_seconds()
+                yield f"Waiting to start... {remaining:.0f} seconds remaining", "", None, "", gr.update(interactive=False), gr.update(interactive=True)
+                time.sleep(1)
+        except ValueError as e:
+            yield f"Error: Invalid schedule time format. Use YYYY-MM-DD HH:MM:SS", "", None, "", gr.update(interactive=True), gr.update(interactive=False)
+            return
     # Initial state - disable start button, enable end button
     yield "", "", None, "", gr.update(interactive=False), gr.update(interactive=True)
     
@@ -676,6 +712,18 @@ with block:
                         batch_button = gr.Button(value="Start Batch Processing", variant="primary")
                         batch_end_button = gr.Button(value="End Batch Processing", interactive=False)
                     batch_status = gr.Markdown('')
+
+                    with gr.Row():
+                        schedule_time = gr.Textbox(
+                            label="Schedule Time (YYYY-MM-DD HH:MM:SS)", 
+                            placeholder="Leave empty to start immediately",
+                            info="Future time to start processing",
+                            interactive=True  # Asegurarse de que es interactivo
+                        )
+                        immediate_start = gr.Checkbox(
+                            label="Start immediately (ignore schedule)", 
+                            value=True
+                        )
                     
                     gr.Markdown("""
                     ### How to use Batch Processing:
@@ -707,7 +755,6 @@ with block:
         queue=False
     )
     
-    # Conexiones para procesamiento por lotes
     batch_button.click(
         fn=process_batch,
         inputs=[
@@ -718,7 +765,9 @@ with block:
             batch_steps,
             batch_teacache,
             batch_gpu_mem,
-            batch_crf
+            batch_crf,
+            schedule_time,
+            immediate_start  
         ],
         outputs=[batch_status, batch_progress, batch_output, batch_progress_bar, batch_button, batch_end_button]
     )
@@ -739,11 +788,25 @@ with block:
         fn=generate_random_seed,
         outputs=[batch_seed]
     )
+    
+    immediate_start.change(
+        fn=lambda x: gr.update(interactive=not x),
+        inputs=[immediate_start],
+        outputs=[schedule_time],
+        queue=False
+    )
 
 # Ejecución
 if args.batch:
     print("Running in batch mode...")
-    process_batch(args.input_folder, args.output_folder, args.duration, args.seed, args.steps)
+    process_batch(
+        args.input_folder, 
+        args.output_folder, 
+        args.duration, 
+        args.seed, 
+        args.steps,
+        schedule_time=args.schedule
+    )
 else:
     block.launch(
         server_name=args.server,
