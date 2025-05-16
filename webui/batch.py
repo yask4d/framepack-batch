@@ -269,7 +269,7 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
 
                 if global_stream.input_queue.top() == 'end':
                     global_stream.output_queue.push(('end', None))
-                    raise KeyboardInterrupt('User ends the task.')
+                    raise InterruptedError('Generation stopped by user')  # Esto forzará la terminación
 
                 current_step = d['i'] + 1
                 percentage = int(100.0 * current_step / steps)
@@ -285,35 +285,40 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
             clean_latents_4x, clean_latents_2x, clean_latents_1x = history_latents[:, :, -sum([16, 2, 1]):, :, :].split([16, 2, 1], dim=2)
             clean_latents = torch.cat([start_latent.to(history_latents), clean_latents_1x], dim=2)
 
-            generated_latents = sample_hunyuan(
-                transformer=transformer,
-                sampler='unipc',
-                width=width,
-                height=height,
-                frames=latent_window_size * 4 - 3,
-                real_guidance_scale=cfg,
-                distilled_guidance_scale=gs,
-                guidance_rescale=rs,
-                num_inference_steps=steps,
-                generator=rnd,
-                prompt_embeds=llama_vec,
-                prompt_embeds_mask=llama_attention_mask,
-                prompt_poolers=clip_l_pooler,
-                negative_prompt_embeds=llama_vec_n,
-                negative_prompt_embeds_mask=llama_attention_mask_n,
-                negative_prompt_poolers=clip_l_pooler_n,
-                device=gpu,
-                dtype=torch.bfloat16,
-                image_embeddings=image_encoder_last_hidden_state,
-                latent_indices=latent_indices,
-                clean_latents=clean_latents,
-                clean_latent_indices=clean_latent_indices,
-                clean_latents_2x=clean_latents_2x,
-                clean_latent_2x_indices=clean_latent_2x_indices,
-                clean_latents_4x=clean_latents_4x,
-                clean_latent_4x_indices=clean_latent_4x_indices,
-                callback=callback,
-            )
+            try:    
+                generated_latents = sample_hunyuan(
+                    transformer=transformer,
+                    sampler='unipc',
+                    width=width,
+                    height=height,
+                    frames=latent_window_size * 4 - 3,
+                    real_guidance_scale=cfg,
+                    distilled_guidance_scale=gs,
+                    guidance_rescale=rs,
+                    num_inference_steps=steps,
+                    generator=rnd,
+                    prompt_embeds=llama_vec,
+                    prompt_embeds_mask=llama_attention_mask,
+                    prompt_poolers=clip_l_pooler,
+                    negative_prompt_embeds=llama_vec_n,
+                    negative_prompt_embeds_mask=llama_attention_mask_n,
+                    negative_prompt_poolers=clip_l_pooler_n,
+                    device=gpu,
+                    dtype=torch.bfloat16,
+                    image_embeddings=image_encoder_last_hidden_state,
+                    latent_indices=latent_indices,
+                    clean_latents=clean_latents,
+                    clean_latent_indices=clean_latent_indices,
+                    clean_latents_2x=clean_latents_2x,
+                    clean_latent_2x_indices=clean_latent_2x_indices,
+                    clean_latents_4x=clean_latents_4x,
+                    clean_latent_4x_indices=clean_latent_4x_indices,
+                    callback=callback,
+                )
+            except InterruptedError:
+                print("Generation stopped by user")
+                global_stream.output_queue.push(('end', None))
+                return
 
             total_generated_latent_frames += int(generated_latents.shape[2])
             history_latents = torch.cat([history_latents, generated_latents.to(history_latents)], dim=2)
@@ -394,22 +399,26 @@ def end_process():
     # Enviar señal de interrupción
     global_stream.input_queue.push('end')
     
-    # Descargar todos los modelos de la GPU
-    if not high_vram:
-        unload_complete_models(
-            text_encoder, text_encoder_2, image_encoder, vae, transformer
-        )
+    # Forzar limpieza inmediata
+    try:
+        if not high_vram:
+            unload_complete_models(
+                text_encoder, text_encoder_2, image_encoder, vae, transformer
+            )
+        torch.cuda.empty_cache()
+    except Exception as e:
+        print(f"Cleanup error: {e}")
     
-    # Resetear el stream para futuras generaciones
-    global_stream = AsyncStream()
-    
-    # Liberar memoria de CUDA (opcional pero recomendado)
-    torch.cuda.empty_cache()
+    # Solo devolver 2 valores para los botones de batch
+    return gr.update(interactive=True), gr.update(interactive=False)
 
 def process_batch(input_folder='input', output_folder='outputs', duration=5.0, seed=31337, steps=25, use_teacache=True, gpu_memory_preservation=6, mp4_crf=16):
     """
     Process a batch of images from the input folder with corresponding prompts
     """
+    # Initial state - disable start button, enable end button
+    yield "", "", None, "", gr.update(interactive=False), gr.update(interactive=True)
+    
     # Crear carpetas si no existen
     os.makedirs(input_folder, exist_ok=True)
     os.makedirs(output_folder, exist_ok=True)
@@ -422,7 +431,7 @@ def process_batch(input_folder='input', output_folder='outputs', duration=5.0, s
     if not os.path.exists(prompt_file):
         error_msg = f"Error: Prompt file not found at {prompt_file}"
         print(error_msg)
-        yield error_msg, "", None, ""
+        yield error_msg, "", None, "", gr.update(interactive=True), gr.update(interactive=False)
         return
     
     # Inicializar parámetros
@@ -472,7 +481,7 @@ def process_batch(input_folder='input', output_folder='outputs', duration=5.0, s
     if not image_files:
         error_msg = f"No image files found in {input_folder}"
         print(error_msg)
-        yield error_msg, "", None, ""
+        yield error_msg, "", None, "", gr.update(interactive=True), gr.update(interactive=False)
         return
     
     print(f"Found {len(image_files)} images to process")
@@ -498,10 +507,9 @@ def process_batch(input_folder='input', output_folder='outputs', duration=5.0, s
         
         # Generar una seed única para este job
         current_seed = generate_random_seed() if seed == -1 else seed
-        # Si seed es -1, se generará una aleatoria para cada job
         
         progress_msg = f"Processing {i+1}/{len(image_files)}: {os.path.basename(image_file)} (Seed: {current_seed})"
-        yield progress_msg, progress_msg, None, last_progress_html
+        yield progress_msg, progress_msg, None, last_progress_html, gr.update(interactive=False), gr.update(interactive=True)
         
         try:
             input_image = np.array(Image.open(image_file))
@@ -534,16 +542,16 @@ def process_batch(input_folder='input', output_folder='outputs', duration=5.0, s
                 if flag == 'file':
                     last_output = data
                     results.append(last_output)
-                    yield f"Generated: {last_output}", progress_msg, gr.Video(value=last_output), last_progress_html
+                    yield f"Generated: {last_output}", progress_msg, gr.Video(value=last_output), last_progress_html, gr.update(interactive=False), gr.update(interactive=True)
                 
                 if flag == 'progress':
                     preview, desc, html = data
                     last_progress_html = html
-                    yield progress_msg, desc, gr.Video(value=last_output) if last_output else None, html
+                    yield progress_msg, desc, gr.Video(value=last_output) if last_output else None, html, gr.update(interactive=False), gr.update(interactive=True)
                 
                 if flag == 'batch_progress':
                     message = data
-                    yield progress_msg, message, gr.Video(value=last_output) if last_output else None, last_progress_html
+                    yield progress_msg, message, gr.Video(value=last_output) if last_output else None, last_progress_html, gr.update(interactive=False), gr.update(interactive=True)
                 
                 if flag == 'end':
                     break
@@ -552,7 +560,7 @@ def process_batch(input_folder='input', output_folder='outputs', duration=5.0, s
             error_msg = f"Error processing {image_file}: {str(e)}"
             print(error_msg)
             results.append(error_msg)
-            yield error_msg, progress_msg, None, last_progress_html
+            yield error_msg, progress_msg, None, last_progress_html, gr.update(interactive=False), gr.update(interactive=True)
     
     # Resumen final
     success_count = len([r for r in results if not isinstance(r, str) or not r.startswith("Error")])
@@ -563,9 +571,9 @@ def process_batch(input_folder='input', output_folder='outputs', duration=5.0, s
         summary += "\nError details:\n" + "\n".join([r for r in results if isinstance(r, str) and r.startswith("Error")])
     
     if last_output is not None:
-        yield summary, "Batch processing completed!", gr.Video(value=last_output), ""
+        yield summary, "Batch processing completed!", gr.Video(value=last_output), "", gr.update(interactive=True), gr.update(interactive=False)
     else:
-        yield summary, "Batch processing completed!", None, ""
+        yield summary, "Batch processing completed!", None, "", gr.update(interactive=True), gr.update(interactive=False)
 
 # Configuración de la interfaz Gradio
 quick_prompts = [
@@ -655,7 +663,7 @@ with block:
                             variant="secondary", 
                             size="lg", 
                             elem_classes="random-seed-btn"
-                    )
+                        )
                     with gr.Row():    
                         batch_steps = gr.Slider(label="Steps", minimum=1, maximum=100, value=25, step=1)
                         batch_teacache = gr.Checkbox(label='Use TeaCache', value=True)
@@ -664,8 +672,9 @@ with block:
                         batch_gpu_mem = gr.Slider(label="GPU Memory (GB)", minimum=6, maximum=128, value=6, step=0.1)
                         batch_crf = gr.Slider(label="MP4 Quality", minimum=0, maximum=100, value=16, step=1)
 
-                    
-                    batch_button = gr.Button(value="Start Batch Processing", variant="primary")
+                    with gr.Row():
+                        batch_button = gr.Button(value="Start Batch Processing", variant="primary")
+                        batch_end_button = gr.Button(value="End Batch Processing", interactive=False)
                     batch_status = gr.Markdown('')
                     
                     gr.Markdown("""
@@ -679,8 +688,7 @@ with block:
                     gr.Markdown("### Batch Processing Output")
                     batch_progress = gr.Textbox(label="Processing Status", interactive=False, lines=1)
                     batch_output = gr.Video(label="Latest Generated Video", autoplay=False, height=480)
-                    batch_progress_bar = gr.HTML('', elem_classes='no-generating-animation')  # Nueva barra de progreso
-
+                    batch_progress_bar = gr.HTML('', elem_classes='no-generating-animation')
     gr.HTML('<div style="text-align:center; margin-top:20px;">Share your results and find ideas at the <a href="https://x.com/search?q=framepack&f=live" target="_blank">FramePack Twitter (X) thread</a></div>')
 
     # Conexiones para generación individual
@@ -695,9 +703,8 @@ with block:
     )
     end_button.click(
         fn=end_process,
-        outputs=None,
-        queue=False,  # ¡Importante! Evita bloquear la cola de Gradio
-        preprocess=False
+        outputs=[start_button, end_button],
+        queue=False
     )
     
     # Conexiones para procesamiento por lotes
@@ -713,7 +720,13 @@ with block:
             batch_gpu_mem,
             batch_crf
         ],
-        outputs=[batch_status, batch_progress, batch_output, batch_progress_bar]  # Añadido batch_progress_bar
+        outputs=[batch_status, batch_progress, batch_output, batch_progress_bar, batch_button, batch_end_button]
+    )
+
+    batch_end_button.click(
+        fn=end_process,
+        outputs=[batch_button, batch_end_button],
+        queue=False
     )
     
     # Conexiones para los botones random seed
